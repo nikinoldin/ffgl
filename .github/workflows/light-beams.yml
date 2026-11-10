@@ -1,0 +1,42 @@
+name: Build Light Beams
+
+on:
+  push:
+    paths:
+      - "source/**"
+      - "build/**"
+      - ".github/workflows/light-beams.yml"
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build universal bundle (Apple Silicon + Intel)
+        run: |
+          xcodebuild -project build/osx/FFGLPlugins.xcodeproj -target LightBeams -configuration Release \
+            ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO build
+      - name: Ad-hoc sign and check
+        run: |
+          codesign --force --deep --sign - binaries/release/LightBeams.bundle
+          lipo -info binaries/release/LightBeams.bundle/Contents/MacOS/LightBeams
+          nm -gU binaries/release/LightBeams.bundle/Contents/MacOS/LightBeams | grep plugMain
+      - name: Zip
+        run: cd binaries/release && ditto -c -k --keepParent LightBeams.bundle LightBeams-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LightBeams-macOS
+          path: binaries/release/LightBeams-macOS.zip
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: microsoft/setup-msbuild@v2
+      - name: Build 64-bit DLL
+        run: msbuild build/windows/LightBeams.vcxproj /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0 /m
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LightBeams-Windows
+          path: binaries/x64/Release/LightBeams.dll
