@@ -78,10 +78,31 @@ also works well with the normal black background).
 
 **Rows** (up to 10), **Columns** (up to 24), **Spacing X**, **Spacing Depth** (metres), **Row Stagger**
 (shifts every other row by half a spacing), **Position Jitter**, **Angle Jitter** (slight random lean),
-**Layout Seed** (new random layout), **Ceiling Height**, **Beam Length**.
+**Layout Seed** (new random layout), **Fixture Height**, **Beam Length**.
 
 **Cam Distance** (to the first row), **Cam Height**, **Cam Tilt** (degrees; tilting up makes the beams
 converge like in a wide photo), **Cam FOV**, **Cam Pan X**.
+
+### Beam direction
+
+- **Beam Tilt**: 0° points straight down, 90° is horizontal, 180° points straight up.
+- **Beam Turn**: which way a tilted beam points. 0° is to the right, 90° away from the camera,
+  -90° towards it, ±180° to the left.
+- **Throw**: how far a beam reaches (metres) when it doesn't hit the floor first.
+- **Mirror**: flips the direction for every other column, row, or in a checker pattern, for
+  criss-cross and fan looks.
+
+Both angles can be animated or MIDI-mapped for sweeping, moving-head style movement. **Beam Length**
+and **Drop Time** grow a beam out from its fixture, whatever its direction.
+
+Some starting points:
+
+| Look | Settings |
+|---|---|
+| Horizontal layers | Tilt 90, Turn 0, Columns 1, Rows 6, Fixture Height 3.5, Cam Height 1, Mirror: Every Other Row |
+| Tunnel of lines | Tilt 90, Turn 90, Rows 1, Columns 8, Fixture Height 3, Cam Distance 4 |
+| Criss-cross | Tilt 45, Mirror: Every Other Column |
+| Floor uplights | Tilt 180, Fixture Height 0, Throw 12 |
 
 ## Notes
 

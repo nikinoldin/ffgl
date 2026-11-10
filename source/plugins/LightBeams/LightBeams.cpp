@@ -66,6 +66,10 @@ enum ParamIndex : unsigned int
 	P_STAGGER,
 	P_JITTER,
 	P_ANGLE_JITTER,
+	P_BEAM_TILT,
+	P_BEAM_TURN,
+	P_THROW,
+	P_MIRROR,
 	P_SEED,
 	P_HEIGHT,
 	P_BEAM_LENGTH,
@@ -100,6 +104,9 @@ static const char* patternNames[ PAT_COUNT ] = {
 	"Static (all on)", "Chase", "Row Chase", "Snake", "Random", "Random Single",
 	"Alternate", "Strobe", "Fill", "Center Out", "Wave", "Manual (triggers only)"
 };
+
+static const int MIRROR_COUNT                  = 4;
+static const char* mirrorNames[ MIRROR_COUNT ] = { "Off", "Every Other Column", "Every Other Row", "Checker" };
 
 static const int RATE_COUNT                = 8;
 static const char* rateNames[ RATE_COUNT ] = { "Free (Hz)", "4 Bars", "2 Bars", "1 Bar", "1/2", "1/4", "1/8", "1/16" };
@@ -155,8 +162,12 @@ static const ParamDef paramDefs[ P_COUNT ] = {
 	{ "Row Stagger", FF_TYPE_STANDARD, 0.5f, 0.0f, 1.0f },
 	{ "Position Jitter", FF_TYPE_STANDARD, 0.25f, 0.0f, 1.0f },
 	{ "Angle Jitter", FF_TYPE_STANDARD, 0.06f, 0.0f, 1.0f },
+	{ "Beam Tilt", FF_TYPE_STANDARD, 0.0f, 0.0f, 180.0f },
+	{ "Beam Turn", FF_TYPE_STANDARD, 0.0f, -180.0f, 180.0f },
+	{ "Throw", FF_TYPE_STANDARD, 40.0f, 1.0f, 100.0f },
+	{ "Mirror", FF_TYPE_OPTION, 0, 0, MIRROR_COUNT },
 	{ "Layout Seed", FF_TYPE_INTEGER, 1, 0, 99 },
-	{ "Ceiling Height", FF_TYPE_STANDARD, 8.0f, 2.0f, 25.0f },
+	{ "Fixture Height", FF_TYPE_STANDARD, 8.0f, 0.0f, 25.0f },
 	{ "Beam Length", FF_TYPE_STANDARD, 1.0f, 0.0f, 1.0f },
 	// Camera
 	{ "Cam Distance", FF_TYPE_STANDARD, 11.0f, 0.5f, 40.0f },
@@ -166,7 +177,7 @@ static const ParamDef paramDefs[ P_COUNT ] = {
 	{ "Cam Pan X", FF_TYPE_STANDARD, 0.0f, -20.0f, 20.0f },
 };
 
-static const int DATA_ROWS = 3;// texels per light, stacked vertically
+static const int DATA_ROWS = 4;// texels per light, stacked vertically
 
 // ---------------------------------------------------------------------------
 // Shaders
@@ -185,7 +196,8 @@ void main()
 // Per light data texture (one column per light):
 //  row 0: top.xy, end.xy        (screen space, y in -1..1, x scaled by aspect)
 //  row 1: widthTop, widthEnd, intensity, floorAmount
-//  row 2: reflectionEnd.xy, spotRadius.xy
+//  row 2: reflectionStart.xy, reflectionEnd.xy (mirror image of the beam in the floor)
+//  row 3: spotRadius.xy, reflectionAmount, reflectionFadePower
 static const char fragmentShaderCode[] = R"(#version 410 core
 in vec2 uv;
 out vec4 fragColor;
@@ -259,12 +271,14 @@ void main()
 		vec4 A = texelFetch( lightData, ivec2( i, 0 ), 0 );
 		vec4 B = texelFetch( lightData, ivec2( i, 1 ), 0 );
 		vec4 C = texelFetch( lightData, ivec2( i, 2 ), 0 );
+		vec4 D = texelFetch( lightData, ivec2( i, 3 ), 0 );
 		float I = B.z;
 
 		float wMax  = max( max( B.x, B.y ), px );
-		float reach = wMax * 25.0 + max( C.z, 0.0 ) * 2.5;
-		float lo    = min( min( A.x, A.z ), C.x ) - reach;
-		float hi    = max( max( A.x, A.z ), C.x ) + reach;
+		float reach = wMax * 25.0 + max( D.x, 0.0 ) * 2.5;
+		reach       = max( reach, wMax * 3.0 * 6.0 );// room for the wider reflection
+		float lo    = min( min( A.x, A.z ), min( C.x, C.z ) ) - reach;
+		float hi    = max( max( A.x, A.z ), max( C.x, C.z ) ) + reach;
 		if( p.x < lo || p.x > hi )
 			continue;
 
@@ -287,19 +301,28 @@ void main()
 		float refl = 0.0;
 		if( B.w > 0.001 )
 		{
-			// Hot spot on the floor, an ellipse squashed by perspective
-			vec2 q   = ( p - A.zw ) / max( C.zw, vec2( px ) );
+			// Hot spot where the beam hits the floor, an ellipse squashed by perspective
+			vec2 q   = ( p - A.zw ) / max( D.xy, vec2( px ) );
 			float sd = dot( q, q );
 			spot     = ( exp( -sd * 3.0 ) * 1.4 + exp( -sqrt( sd ) * 1.6 ) * 0.2 ) * floorGlow * B.w;
-
-			// Mirrored beam on the glossy floor, with a little ripple
+		}
+		if( D.z > 0.001 )
+		{
+			// Mirror image of the beam in the glossy floor, with a little ripple
 			vec2 pr = p;
 			pr.x += ( vnoise( vec2( p.y * 18.0, time * 0.8 + float( i ) * 3.7 ) ) - 0.5 ) * B.y * 0.9;
 			float tr;
-			float dr  = segment( pr, A.zw, C.xy, tr );
-			float wr  = max( mix( B.y * 1.4, B.y * 3.0, tr ), px );
-			float xr2 = ( dr * dr ) / ( wr * wr );
-			refl      = ( exp( -xr2 * 1.0 ) * 0.55 + exp( -xr2 * 0.05 ) * 0.08 * glow ) * pow( 1.0 - tr, 2.0 ) * reflection * B.w;
+			float dr  = segment( pr, C.xy, C.zw, tr );
+			// D.w: fade power (3 for vertical beams, 0 for flat), negative when the fixture end is the lower one
+			float steep = clamp( abs( D.w ) / 3.0, 0.0, 1.0 );
+			float wLow  = D.w < 0.0 ? B.x : B.y;
+			float wHigh = D.w < 0.0 ? B.y : B.x;
+			float wr    = max( mix( wLow * 1.3, mix( wHigh * 1.3, wLow * 3.0, steep ), tr ), px );
+			float xr2   = ( dr * dr ) / ( wr * wr );
+			float fade  = abs( D.w ) > 0.01 ? pow( 1.0 - tr, abs( D.w ) ) : 1.0;
+			fade *= mix( smoothstep( 0.0, 0.12, tr ) * smoothstep( 1.0, 0.88, tr ), 1.0, steep );// soft ends on flat beams
+			refl = ( exp( -xr2 * 1.0 ) * 0.55 + exp( -xr2 * 0.05 ) * 0.08 * glow ) * fade * reflection * D.z;
+			refl *= smoothstep( reach, reach * 0.35, dr );// fade out before the culling edge
 		}
 
 		coreSum += I * ( core + fix );
@@ -422,7 +445,7 @@ LightBeams::LightBeams() :
 		{
 		case FF_TYPE_OPTION:
 		{
-			const char** names = i == P_PATTERN ? patternNames : rateNames;
+			const char** names = i == P_PATTERN ? patternNames : i == P_RATE ? rateNames : mirrorNames;
 			SetOptionParamInfo( i, d.name, (unsigned int)d.max, d.def );
 			for( unsigned int e = 0; e < (unsigned int)d.max; ++e )
 				SetParamElementInfo( i, e, names[ e ], (float)e );
@@ -523,7 +546,7 @@ char* LightBeams::GetParameterDisplay( unsigned int index )
 	case FF_TYPE_OPTION:
 	{
 		int i = std::min( std::max( PI( index ), 0 ), (int)d.max - 1 );
-		snprintf( displayBuffer, sizeof( displayBuffer ), "%s", index == P_PATTERN ? patternNames[ i ] : rateNames[ i ] );
+		snprintf( displayBuffer, sizeof( displayBuffer ), "%s", index == P_PATTERN ? patternNames[ i ] : index == P_RATE ? rateNames[ i ] : mirrorNames[ i ] );
 		break;
 	}
 	case FF_TYPE_INTEGER:
@@ -798,6 +821,10 @@ void LightBeams::BuildLightData()
 	const float base      = P( P_BASE_LEVEL );
 	const int pattern     = PI( P_PATTERN );
 	const float nearZ     = 0.05f;
+	const float beamTilt  = P( P_BEAM_TILT ) * deg;
+	const float beamTurn  = P( P_BEAM_TURN ) * deg;
+	const float throwDist = P( P_THROW );
+	const int mirrorMode  = PI( P_MIRROR );
 
 	int rate        = std::min( std::max( PI( P_RATE ), 0 ), RATE_COUNT - 1 );
 	double wavePos  = ( rate != 0 && bpm > 0.0f ) ? ( barCount + barPhase ) * stepsPerBar[ rate ] : freeSteps;
@@ -807,6 +834,7 @@ void LightBeams::BuildLightData()
 	float* row0      = lightData.data();
 	float* row1      = row0 + stride;
 	float* row2      = row1 + stride;
+	float* row3      = row2 + stride;
 
 	activeCount = 0;
 	totalLight  = 0.0f;
@@ -844,11 +872,31 @@ void LightBeams::BuildLightData()
 			x += l.jitterX * jitter * sx * 0.4f;
 			float z = P( P_CAM_DIST ) + r * sz + l.jitterZ * jitter * sz * 0.4f;
 
-			float lean   = l.angle * P( P_ANGLE_JITTER ) * 0.3f;// up to ~17 degrees
-			Vec3 top     = { x, height, z };
-			Vec3 floorPt = { x + std::tan( lean ) * height, 0.0f, z };
-			Vec3 end     = Lerp( top, floorPt, length );
-			Vec3 mirror  = { x, -height * 0.6f, z };// reflection of the upper part of the beam
+			// Beam direction: tilt 0 points down, 90 sideways, 180 up. Turn rotates it around the vertical.
+			bool flip = false;
+			switch( mirrorMode )
+			{
+			case 1: flip = c % 2 == 1; break;
+			case 2: flip = r % 2 == 1; break;
+			case 3: flip = ( r + c ) % 2 == 1; break;
+			default: break;
+			}
+			float lean  = l.angle * P( P_ANGLE_JITTER ) * 0.3f;// up to ~17 degrees
+			float pitch = beamTilt + lean;
+			float yaw   = beamTurn + ( flip ? 3.14159265f : 0.0f );
+			Vec3 dir    = { std::sin( pitch ) * std::cos( yaw ), -std::cos( pitch ), std::sin( pitch ) * std::sin( yaw ) };
+
+			Vec3 top       = { x, height, z };
+			float reach    = throwDist;
+			bool hitsFloor = false;
+			if( dir.y < -1e-4f && height / -dir.y <= throwDist )
+			{
+				reach     = height / -dir.y;
+				hitsFloor = true;
+			}
+			float travel = reach * length;
+			Vec3 end     = { top.x + dir.x * travel, top.y + dir.y * travel, top.z + dir.z * travel };
+			Vec3 floorPt = { top.x + dir.x * reach, 0.0f, top.z + dir.z * reach };
 
 			Vec3 a = top, b = end;
 			if( !ClipNear( cam, a, b, nearZ ) )
@@ -856,21 +904,15 @@ void LightBeams::BuildLightData()
 			Proj pa = cam.Project( a );
 			Proj pb = cam.Project( b );
 
-			float worldEndWidth = width * ( 1.0f + spread * 4.0f * length );
+			float worldEndWidth = width * ( 1.0f + spread * 0.5f * travel );
 			float wTop          = width * 0.5f * cam.focal / pa.depth;
 			float wEnd          = worldEndWidth * 0.5f * cam.focal / pb.depth;
 
-			// Floor contact: only when the beam reaches the floor and the floor point is in view
-			float floorAmt = Smoothstep( 0.92f, 1.0f, length );
-			Proj pm        = { pb.x, pb.y, pb.depth };
+			// Floor contact: only when the beam reaches the floor and that point is in view
+			float floorAmt = hitsFloor ? Smoothstep( 0.92f, 1.0f, length ) : 0.0f;
 			float spotRx = 0.0f, spotRy = 0.0f;
 			if( floorAmt > 0.0f && cam.Depth( floorPt ) > nearZ )
 			{
-				Vec3 m = mirror;
-				m.x    = floorPt.x;
-				Vec3 fa = floorPt;
-				if( ClipNear( cam, fa, m, nearZ ) )
-					pm = cam.Project( m );
 				float radius = 0.25f + worldEndWidth * 2.0f;
 				Proj pr      = cam.Project( { floorPt.x + radius, 0.0f, floorPt.z } );
 				Proj pf      = cam.Project( { floorPt.x, 0.0f, floorPt.z + radius } );
@@ -880,6 +922,28 @@ void LightBeams::BuildLightData()
 			}
 			else
 				floorAmt = 0.0f;
+
+			// Reflection: the beam mirrored in the floor, starting from the end nearest the floor.
+			// Steep beams fade out along their length, flat ones stay even.
+			Vec3 low = end, high = top;
+			if( top.y < end.y )
+				std::swap( low, high );
+			float reflAmt  = 0.0f, reflPow = 0.0f;
+			Proj r0 = pb, r1 = pb;
+			if( low.y >= -1e-3f )
+			{
+				Vec3 m0 = { low.x, -low.y, low.z };
+				Vec3 m1 = Lerp( m0, { high.x, -high.y, high.z }, std::fabs( dir.y ) > 0.5f ? 0.6f : 1.0f );
+				if( ClipNear( cam, m0, m1, nearZ ) )
+				{
+					r0      = cam.Project( m0 );
+					r1      = cam.Project( m1 );
+					reflAmt = std::exp( -std::max( low.y, 0.0f ) * 0.25f );
+					reflPow = 3.0f * std::fabs( dir.y );
+					if( top.y < end.y )
+						reflPow = -std::max( reflPow, 1e-3f );// tells the shader the fixture end is the low one
+				}
+			}
 
 			float fade = std::exp( -depthFade * 0.08f * std::max( z - P( P_CAM_DIST ), 0.0f ) );
 			float I    = level * fade;
@@ -893,10 +957,14 @@ void LightBeams::BuildLightData()
 			row1[ o + 1 ] = wEnd;
 			row1[ o + 2 ] = I;
 			row1[ o + 3 ] = floorAmt;
-			row2[ o + 0 ] = pm.x;
-			row2[ o + 1 ] = pm.y;
-			row2[ o + 2 ] = spotRx;
-			row2[ o + 3 ] = spotRy;
+			row2[ o + 0 ] = r0.x;
+			row2[ o + 1 ] = r0.y;
+			row2[ o + 2 ] = r1.x;
+			row2[ o + 3 ] = r1.y;
+			row3[ o + 0 ] = spotRx;
+			row3[ o + 1 ] = spotRy;
+			row3[ o + 2 ] = reflAmt;
+			row3[ o + 3 ] = reflPow;
 			++activeCount;
 			totalLight += I;
 		}
